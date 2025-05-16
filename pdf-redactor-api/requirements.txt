@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pymupdf           # for fitz
+pillow            # for image processing
+pytesseract       # for OCR
+transformers      # for PII detection
+torch             # required by transformers models
+numpy             # often required by pytesseract and transformers

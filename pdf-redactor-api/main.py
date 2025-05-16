@@ -7,6 +7,7 @@ import uuid
 import logging
 from extract_files import extract_layout
 from detect_pii import detect_pii
+from redact_regions import redact_and_extract_regions
 
 # Set up logging
 logging.basicConfig(
@@ -56,12 +57,10 @@ async def upload_pdf(file: UploadFile = File(...)):
         layout_info = await extract_layout(file_path)
         logger.info(f"Extracted {len(layout_info)} text spans with coords")
 
-        pii_spans = await detect_pii(layout_info)
+        pii_spans = await detect_pii(layout_info) 
         logger.info(f"Found {len(pii_spans)} PII spans")
         
-        # Here you would call your PDF processing function
-        # For example: result = process_pdf(file_path)
-        
+        redaction_info = await redact_and_extract_regions(file_path, pii_spans)
         # This is a placeholder for your actual processing logic
         analysis_result = {
             "file_id": file_id,
@@ -71,6 +70,8 @@ async def upload_pdf(file: UploadFile = File(...)):
             # Add your analysis results here
             "layout": layout_info,
             "pii_spans": pii_spans,
+            "redacted_pdf": redaction_info["redacted_pdf"],
+            "redaction_regions": redaction_info["regions"]
         }
         
         logger.info("Processing complete")
