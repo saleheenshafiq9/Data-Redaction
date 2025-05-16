@@ -1,13 +1,15 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import os
-import shutil
 import uuid
 import logging
+import json
+
 from extract_files import extract_layout
 from detect_pii import detect_pii
 from redact_regions import redact_and_extract_regions
+from restore_pdf import restore_pdf_by_uuid
 
 # Set up logging
 logging.basicConfig(
@@ -19,75 +21,112 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Allow CORS from any Chrome extension
-# In production, you should restrict this to your specific extension ID
+# Allow CORS (restrict to your extension ID in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, use your specific extension ID
-    allow_methods=["POST"],
+    allow_origins=["*"],
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
 
-# Create uploads directory if it doesn't exist
+# Create uploads directory
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.get("/")
+async def root():
+    return {"message": "PDF Redactor API is running"}
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     logger.info(f"Received file: {file.filename}")
-    
-    # Check if it's a PDF (based on content type or extension)
-    if not file.content_type == "application/pdf" and not file.filename.lower().endswith('.pdf'):
-        logger.warning(f"File rejected: {file.content_type} is not a PDF")
+
+    # Validate PDF
+    if file.content_type != "application/pdf" and not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
-    
+
     try:
-        # Generate unique filename
-        file_id = str(uuid.uuid4())
+        # Save original PDF
+        file_id   = str(uuid.uuid4())
         file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
-        
-        # Read and save the file
-        contents = await file.read()
-        logger.info(f"Read {len(contents)} bytes")
-        
+        contents  = await file.read()
         with open(file_path, "wb") as f:
             f.write(contents)
         logger.info(f"Saved to {file_path}")
 
+        # 1) Ingestion & Preprocessing
         layout_info = await extract_layout(file_path)
-        logger.info(f"Extracted {len(layout_info)} text spans with coords")
+        logger.info(f"Extracted {len(layout_info)} text spans")
 
-        pii_spans = await detect_pii(layout_info) 
+        # 2) Sensitive-info Detection
+        pii_spans = await detect_pii(layout_info)
         logger.info(f"Found {len(pii_spans)} PII spans")
-        
+
+        # 3) Redaction & Metadata Linking
         redaction_info = await redact_and_extract_regions(file_path, pii_spans)
-        # This is a placeholder for your actual processing logic
+        logger.info("Redaction complete")
+
+        # Build sidecar metadata
+        sidecar = {"regions": redaction_info["regions"]}
+
+        # Response includes redacted PDF path and sidecar JSON
         analysis_result = {
             "file_id": file_id,
             "original_name": file.filename,
             "size_bytes": len(contents),
             "path": file_path,
-            # Add your analysis results here
             "layout": layout_info,
             "pii_spans": pii_spans,
             "redacted_pdf": redaction_info["redacted_pdf"],
-            "redaction_regions": redaction_info["regions"]
+            "sidecar": sidecar
         }
-        
-        logger.info("Processing complete")
-        return JSONResponse(content={
+
+        return JSONResponse({
             "status": "success",
-            "message": "PDF successfully uploaded and processed",
+            "message": "PDF uploaded and redacted",
             "result": analysis_result
         })
-        
-    except Exception as e:
-        logger.error(f"Error processing upload: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
-@app.get("/")
-async def root():
-    return {"message": "PDF Redactor API is running"}
+    except Exception as e:
+        logger.error(f"Error processing upload: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/restore")
+async def restore_pdf_endpoint(
+    file: UploadFile = File(...),
+    sidecar: str      = Form(...)   # sidecar JSON as form field
+):
+    logger.info(f"Restoring PDF: {file.filename}")
+
+    try:
+        # 1) Save the uploaded redacted PDF
+        tmp_id   = str(uuid.uuid4())
+        redacted_path = os.path.join(UPLOAD_DIR, f"{tmp_id}_redacted.pdf")
+        data     = await file.read()
+        with open(redacted_path, "wb") as f:
+            f.write(data)
+
+        # 2) Parse sidecar JSON
+        sidecar_obj = json.loads(sidecar)
+        # Build lookup map: uuid -> region record
+        sidecar_map = {r["uuid"]: r for r in sidecar_obj["regions"]}
+
+        # 3) Restore
+        restored_path = restore_pdf_by_uuid(redacted_path, sidecar_map)
+        logger.info(f"Restored PDF saved to: {restored_path}")
+
+        # 4) Send back restored PDF
+        return FileResponse(
+            restored_path,
+            media_type="application/pdf",
+            filename=os.path.basename(restored_path)
+        )
+
+    except Exception as e:
+        logger.error(f"Error restoring PDF: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
