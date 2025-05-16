@@ -28,7 +28,8 @@ The backend API is implemented using Python FAST API. Follow these steps to set 
 
 3. **Run the Backend Server**
 
-   ```uvicorn main:app --reload
+   ```
+   uvicorn main:app --reload
    ```
 
    By default, Fast API runs on `http://127.0.0.1:8000/`.
